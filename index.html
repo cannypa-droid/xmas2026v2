@@ -138,13 +138,26 @@ var ERR = {
   E_DUP_NAME:"名單中有重複的姓名,請加上區別(例如:小明A、小明B)。",
   E_BAD_NAME:"名稱格式不正確(活動名稱 1~60 字、姓名 1~30 字)。",
   E_BAD_SLIP:"籤的內容需為 1~80 個字。",
+  E_BAD_NOTE:"真心話內容需為 1~300 個字。",
   E_ALREADY_STARTED:"抽籤已經啟動過了。",
-  E_NOT_OPEN:"主辦人尚未開放抽籤。",
-  E_SERVER:"伺服器暫時忙碌或發生錯誤,請稍後再試一次。",
+  E_NOT_OPEN:"尚未開放,或你還沒完成抽籤(要先抽完籤才能送出)。",
+  E_SERVER:"伺服器暫時忙碌(可能同時送出的人較多),請等幾秒後再按一次送出。",
+  E_NOFN:"後端程式還是舊版,缺少這個功能。請把最新的 Code.gs 貼到 Apps Script,並到「部署 → 管理部署作業 → ✏️ → 版本:新版本 → 部署」重新部署。",
   E_VERIFY_FAILED:"分配驗證失敗,系統已自動還原,尚未開放抽籤。請再按一次重試。",
   E_DERANGE_FAILED:"分配失敗,系統已自動還原,尚未開放抽籤。請再按一次重試。"
 };
+var RETRY={submit_slip:1,submit_note:1,reveal:1,participant_state:1,host_state:1};
 function rpc(fn,args){
+  var n=0;
+  function go(){
+    return rpc1(fn,args).catch(function(e){
+      if(RETRY[fn]&&(e.code==="E_SERVER"||e.code==="E_NET")&&n<3){n++;return new Promise(function(r){setTimeout(r,1200*n)}).then(go)}
+      throw e;
+    });
+  }
+  return go();
+}
+function rpc1(fn,args){
   var url=CFG.APPS_SCRIPT_URL;
   if(!url||url.indexOf("你的")>=0){return Promise.reject({code:"E_CONFIG",message:"尚未設定 config.js(Apps Script 網頁應用程式網址)。"})}
   return fetch(url,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify({fn:fn,args:args||{}}),redirect:"follow"})
@@ -152,6 +165,14 @@ function rpc(fn,args){
     return r.text().then(function(t){
       var j=null;try{j=JSON.parse(t)}catch(e){}
       if(!j){throw {code:"E_NET",message:"伺服器回應異常,請確認 Apps Script 已部署為「任何人」可存取,且網址正確。"}}
+      if(j.error==="E_NOFN"){
+        var dep=(url.match(/\/s\/([^\/]+)\//)||[])[1]||"";
+        return fetch(url,{redirect:"follow"}).then(function(g){return g.text()}).catch(function(){return ""}).then(function(gt){
+          var v="";try{v=JSON.parse(gt).data}catch(e){}
+          var vm=(v.match(/版本:([^(。]+)/)||[])[1];
+          throw {code:"E_NOFN",message:ERR.E_NOFN+" 【診斷】網站目前連到的部署 ID 結尾:…"+dep.slice(-8)+";該部署回報的後端版本:"+(vm||"無版本資訊(很舊的版本)")+";需要的版本:2026-10-14-note-v2。"};
+        });
+      }
       if(j.error){throw {code:j.error,message:ERR[j.error]||("系統錯誤:"+j.error)}}
       return j.data;
     });
@@ -220,7 +241,7 @@ function landing(){
 }
 
 /* ============ 主辦人後台 ============ */
-var hs=null, hshowAll=false, hstarting=false, hstartErr="";
+var hs=null, hshowAll=false, hshowNotes=false, hstarting=false, hstartErr="";
 function hostView(){
   stopPoll();
   app.innerHTML='<h1>🎅 主辦人後台</h1><p class="sub" id="hsub">載入中…</p><div id="hbody"></div>';
@@ -275,6 +296,12 @@ function renderHost(){
     h+='<div class="panel"><h2>📋 全部配對結果</h2><div class="hint">若你自己也是參加者,看了會破壞驚喜喔。</div>'+
       (hshowAll?'<table><tr><th>參加者</th><th>抽到的籤</th><th>籤的作者</th></tr>'+ps.map(function(p){return '<tr><td>'+esc(p.name)+'</td><td>'+esc(p.gets_slip)+'</td><td>'+esc(p.gets_from)+'</td></tr>'}).join("")+'</table><div class="row" style="margin-top:10px"><button class="small secondary" data-a="hideall">隱藏結果</button></div>':
       '<button class="full secondary" data-a="showall">顯示全部配對結果</button>')+'</div>';
+    var nd=ps.filter(function(p){return p.note});
+    h+='<div class="panel"><h2>💌 畢業信箋(真心話)</h2><div class="hint">參加者在抽完籤後的「下一頁」寫下並送出,只有你看得到,可在活動日當天分享給大家。</div>'+
+      '<div style="font-weight:700;margin:6px 0">已送出 '+nd.length+'/'+n+' 人</div>'+
+      (hshowNotes?(nd.length?'<table><tr><th style="width:90px">姓名</th><th>真心話</th></tr>'+nd.map(function(p){return '<tr><td>'+esc(p.name)+'</td><td style="white-space:pre-wrap">'+esc(p.note)+'</td></tr>'}).join("")+'</table>':'<div class="hint">目前還沒有人送出。</div>')+
+        '<div class="row" style="margin-top:10px"><button class="small" data-a="copynotes">複製全部真心話</button><button class="small secondary" data-a="hidenotes">隱藏</button></div>':
+        '<button class="full secondary" data-a="shownotes">顯示全部真心話</button>')+'</div>';
     h+='<div class="panel"><h2>🔗 參加者連結</h2><ul class="plist">'+ps.map(function(p){return '<li><span class="nm"><span class="dot '+(p.revealed?"on":"")+'"></span>'+esc(p.name)+'</span><button class="small secondary" data-a="copy" data-t="'+p.token+'">複製連結</button><button class="small secondary" data-a="qr" data-t="'+p.token+'" data-n="'+esc(p.name)+'">QR</button></li>'}).join("")+'</ul></div>';
     h+='<div class="panel"><h2>🏁 結束活動</h2>'+
       (ev.phase===2?'<button class="full secondary" data-a="end">結束活動(未揭曉者將無法再抽)</button>':'<div class="hint">活動已結束。</div>')+
@@ -291,6 +318,9 @@ document.addEventListener("click",function(e){
   else if(a==="copy")copyText(participantLink(b.getAttribute("data-t")));
   else if(a==="copyall")copyText(hs.event.name+"\n"+hs.participants.map(function(p){return p.name+":"+participantLink(p.token)}).join("\n"));
   else if(a==="qr")showQR(b.getAttribute("data-n"),participantLink(b.getAttribute("data-t")));
+  else if(a==="shownotes"){hshowNotes=true;renderHost()}
+  else if(a==="hidenotes"){hshowNotes=false;renderHost()}
+  else if(a==="copynotes")copyText(hs.event.name+" 畢業信箋\n\n"+hs.participants.filter(function(p){return p.note}).map(function(p){return p.name+":\n"+p.note}).join("\n\n"));
   else if(a==="showall"){hshowAll=true;renderHost()}
   else if(a==="hideall"){hshowAll=false;renderHost()}
   else if(a==="add"){var v=$("#addname").value;rpc("host_add_participant",{p_event:EID,p_host:HTOKEN,p_name:v}).then(function(){loadHost(false)}).catch(function(er){$("#adderr").innerHTML='<div class="err">'+esc(er.message)+'</div>'})}
@@ -346,8 +376,8 @@ function loadP(first){
 function renderP(){
   var s=ps_,h='<h1>🎄 '+esc(s.event_name)+'</h1><p class="sub">Hi,'+esc(s.my_name)+'</p>';
   if(s.phase===1){
-    h+='<div class="panel"><h2>📝 第一階段:填寫你的籤</h2><div class="hint">寫下你想送出的籤(例如禮物想法、任務、祝福)。主辦人開放後,你會隨機抽到別人寫的籤。目前還不能抽籤。</div>'+
-      '<textarea id="slip" maxlength="80" placeholder="請輸入籤的內容(最多 80 字)">'+esc(s.my_slip||"")+'</textarea>'+
+    h+='<div class="panel"><h2>📝 第一階段:填寫你的籤</h2><div class="hint" style="font-size:14px;color:#5b4a36;line-height:1.7">寫下你的名字和想收到禮物的形容詞，不能直接填寫品項喔！！！填寫完成後，主辦人會開放抽籤，你會隨機抽到別人寫的籤。</div>'+
+      '<textarea id="slip" maxlength="80" placeholder="例如:小明,想收到「暖暖的、可愛的」禮物(最多 80 字)">'+esc(s.my_slip||"")+'</textarea>'+
       '<div class="hint" id="cnt"></div><div id="perr"></div>'+
       '<button class="full" id="send">'+(s.submitted?"更新我的籤":"送出我的籤")+'</button>'+
       '<div id="pstat" style="margin-top:10px">'+(s.submitted?'<div class="ok">已成功提交,請等待主辦人開放抽籤。<br><span style="font-weight:400;font-size:13px">在主辦人開放前,你仍可修改內容。</span></div>':'<div class="warn">你尚未提交。</div>')+'</div></div>';
@@ -396,20 +426,31 @@ function showCard(text,again){
   $("#save").onclick=function(){saveCard(text)};
   $("#next").onclick=showNote;
 }
-var heartText="";
+var heartText=null;
 function showNote(){
+  if(heartText===null)heartText=ps_.my_note||"";
   stopPoll();document.body.classList.add("magic");
   var sn=document.getElementById("snow");if(sn)sn.style.display="none";
   try{window.XMASAUDIO&&window.XMASAUDIO.setMode("fly")}catch(e){}
   var stars="";for(var i=0;i<45;i++){stars+='<i style="left:'+(Math.random()*100)+'%;top:'+(Math.random()*100)+'%;animation-delay:-'+(Math.random()*3)+'s"></i>'}
   var candles="";[[6,34,52],[22,10,70],[42,26,56],[62,6,76],[80,30,60]].forEach(function(c){candles+='<div class="candle" style="left:'+c[0]+'%;top:'+c[1]+'px;height:'+c[2]+'px;animation-delay:-'+(c[0]/20)+'s"></div>'});
   app.innerHTML='<div id="magicbg">'+stars+'</div><div class="candles">'+candles+'</div>'+
-   '<div class="scroll"><div class="deco">🎓 🦉 🪄</div><div class="kicker">魔法學院 · 畢業信箋</div>'+
+   '<div class="scroll"><div class="deco">🎓 🦉 🪄</div>'+
    '<h2>有可能是最後一次交換禮物？</h2><p class="lead">寫下想對大家或是某人的真心話吧～</p>'+
    '<textarea id="heart" maxlength="300" placeholder="在這裡寫下你的真心話…">'+esc(heartText)+'</textarea>'+
-   '<p class="tiny">✎ 這裡寫的內容只會留在你的手機畫面,不會上傳或被別人看到。</p><div class="seal">🎓</div></div>'+
+   '<div id="nerr"></div>'+
+   '<button id="sendnote" class="full" style="margin-top:10px">'+(ps_.note_submitted?'更新並重新送出':'送出給主辦人')+'</button>'+
+   '<div id="nstat" style="margin-top:10px">'+(ps_.note_submitted?'<div class="ok" style="font-family:inherit">已送出！主辦人會於活動日當天分享給大家。<br><span style="font-weight:400;font-size:13px">想修改可以改完再按一次送出。</span></div>':'')+'</div>'+
+   '<p class="tiny">✎ 內容完成後送出到主辦人，會於活動日當天分享給大家。</p><div class="seal">🎓</div></div>'+
    '<div style="text-align:center;margin-top:18px"><button class="secondary" id="prev" style="background:#fff">⬅ 上一頁</button></div>';
   $("#heart").oninput=function(){heartText=this.value};
+  $("#sendnote").onclick=function(){
+    var btn=this,v=$("#heart").value;btn.disabled=true;$("#nerr").innerHTML="";
+    rpc("submit_note",{p_event:EID,p_token:PTOKEN,p_text:v}).then(function(){
+      ps_.note_submitted=true;ps_.my_note=v.trim();btn.disabled=false;btn.textContent="更新並重新送出";
+      $("#nstat").innerHTML='<div class="ok" style="font-family:inherit">已送出！主辦人會於活動日當天分享給大家。<br><span style="font-weight:400;font-size:13px">想修改可以改完再按一次送出。</span></div>';
+    }).catch(function(e){btn.disabled=false;$("#nerr").innerHTML='<div class="err">'+esc(e.message)+'</div>'});
+  };
   $("#prev").onclick=function(){showCard(ps_.result,true)};
 }
 
@@ -480,7 +521,7 @@ function saveCard(text){
 (function(){
   var KEY="xmas_music", btn=document.getElementById("musicbtn");
   var wantOn=true; try{ if(localStorage.getItem(KEY)==="off") wantOn=false; }catch(e){}
-  var ctx=null, master=null, bus=null, started=false, nextEnd=0, poller=null, fileEl=null, flyEl=null, hasFile=false, hasFly=false, songIdx=0, mode="xmas";
+  var ctx=null, master=null, bus=null, started=false, nextEnd=0, poller=null, fileEl=null, flyEl=null, hasFile=false, hasFly=true, flyTry=0, songIdx=0, mode="xmas";
   var F={C4:261.63,D4:293.66,E4:329.63,F4:349.23,G4:392,A4:440,B4:493.88,C5:523.25,D5:587.33,E5:659.25,F5:698.46,G5:783.99,A5:880,C6:1046.5};
   var WISH=[["G4",1],["C5",1],["C5",.5],["D5",.5],["C5",.5],["B4",.5],["A4",1],["A4",1],["A4",1],["D5",1],["D5",.5],["E5",.5],["D5",.5],["C5",.5],["B4",1],["G4",1],["G4",1],["E5",1],["E5",.5],["F5",.5],["E5",.5],["D5",.5],["C5",1],["A4",1],["G4",.5],["G4",.5],["A4",1],["D5",1],["B4",1],["C5",3],["R",2]];
   var JINGLE=[["E5",1],["E5",1],["E5",2],["E5",1],["E5",1],["E5",2],["E5",1],["G5",1],["C5",1.5],["D5",.5],["E5",4],["F5",1],["F5",1],["F5",1.5],["F5",.5],["F5",1],["E5",1],["E5",1],["E5",.5],["E5",.5],["E5",1],["D5",1],["D5",1],["E5",1],["D5",2],["G5",2],["R",2]];
@@ -520,7 +561,9 @@ function saveCard(text){
   function newBus(){ if(!ctx)return; try{ if(bus)bus.disconnect(); }catch(e){} bus=ctx.createGain(); bus.connect(master); }
   function tick(){ if(usingFile())return; if(ctx&&ctx.state==="running"&&ctx.currentTime>nextEnd-1.5) scheduleSong(); }
   function setUI(on){ if(!btn)return; btn.textContent=on?"🔔":"🔕"; btn.className=on?"":"off"; btn.title=on?"關閉背景音樂":"開啟背景音樂"; }
-  function fileFor(){ if(mode==="fly"){ if(!flyEl){flyEl=new Audio("fly.mp3");flyEl.loop=true;flyEl.volume=.6;} return flyEl; }
+  function fileFor(){ if(mode==="fly"){ if(!flyEl){flyEl=new Audio();flyEl.src=["fly.m4a","fly.mp3"][flyTry];flyEl.loop=true;flyEl.volume=.7;
+      flyEl.addEventListener("error",function(){ if(flyTry<1){flyTry++;flyEl.src="fly.mp3";flyEl.play().catch(function(){});} else { hasFly=false; flyEl=null; if(mode==="fly"&&started&&wantOn)start(); } }); }
+    return flyEl; }
     if(!fileEl){fileEl=new Audio("music.mp3");fileEl.loop=true;fileEl.volume=.5;} return fileEl; }
   function start(){
     started=true; btn.classList.remove("hint");
@@ -548,7 +591,6 @@ function saveCard(text){
     if(document.hidden)stop(); else if(wantOn&&started){ if(usingFile())fileFor().play().catch(function(){}); else if(ctx)ctx.resume(); }
   });
   setUI(wantOn); if(wantOn) btn.classList.add("hint");
-  try{ fetch("fly.mp3",{method:"HEAD"}).then(function(r){ if(r.ok){hasFly=true;} }).catch(function(){}); }catch(e){}
   try{ fetch("music.mp3",{method:"HEAD"}).then(function(r){ if(r.ok){hasFile=true;} }).catch(function(){}); }catch(e){}
   function setMode(m){
     if(m===mode)return; mode=m; nextEnd=0;
